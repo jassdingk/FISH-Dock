@@ -171,6 +171,22 @@ pub fn extension_page_close(window:WebviewWindow,ticket:String)->Result<(),Strin
 #[tauri::command]
 pub async fn extension_page_call(window:WebviewWindow,ticket:String,method:String,params:Value)->Result<Value,String>{trusted(&window)?;tauri::async_runtime::spawn_blocking(move||crate::plugin_page::call(&ticket,&method,params)).await.map_err(|_|"插件页面请求意外结束")?}
 
+// 声明式岛子面板（island.sub）：返回「已启用且 manifest 声明了 islandSub」的插件清单
+// [{id, sub}]，供主灵动岛前端据此决定挂载哪类子岛、并把数据请求发到对应插件。
+// 只读注册表（不碰 GitHub/目录），轻量、可高频轮询。
+#[tauri::command]
+pub async fn extension_island_subs(window:WebviewWindow)->Result<Value,String>{
+    trusted(&window)?;
+    tauri::async_runtime::spawn_blocking(||{
+        let context=crate::storage_context::current().ok_or("存储上下文未就绪")?;
+        let manager=Manager{context};
+        let mut out=Vec::new();
+        for installed in manager.list()? {
+            if installed.enabled { if let Some(sub)=installed.manifest.island_sub.as_deref() { out.push(json!({"id":installed.manifest.id,"sub":sub})); } }
+        }
+        Ok::<Value,String>(json!(out))
+    }).await.map_err(|_|"岛子面板探测任务意外结束")?
+}
 pub fn resume(){
     std::thread::spawn(||{
         let Some(context)=crate::storage_context::current()else{return};

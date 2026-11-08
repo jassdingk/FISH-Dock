@@ -6146,14 +6146,16 @@
   if (!core || !core.invoke) return
   if (!window.pet || !window.pet.onFileDrag) return
 
-  const PLUGIN_ID = 'jassdingk.filemgr'
+  // 声明式：子岛数据仍走 extension_call，但用哪个插件作数据源由 manifest 的 islandSub 声明决定；
+  // 默认回退 filemgr，探测到哪个插件声明了 "stash" 子面板就用它（以后别的插件也能接管）。
+  let PROVIDER_ID = 'jassdingk.filemgr'
   const THICK = 40          // 展开时长条厚度（≈ dock 静默收起时胶囊厚度）
   const BALL = 36           // 收起后的小球直径
   const RAD_BALL = BALL / 2
   const GAP = 8             // 展开长条与 dock 的垂直间距
   const GAP_R = 8           // 收起小球与 dock 的水平间距（左侧）
   const invoke = core.invoke
-  const call = (method, params) => invoke('extension_call', { id: PLUGIN_ID, method, params: params || {} })
+  const call = (method, params) => invoke('extension_call', { id: PROVIDER_ID, method, params: params || {} })
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
 
   // ===== IslandX 的弹簧求解器（Core/SpringValue.cs 移植）=====
@@ -6248,6 +6250,8 @@
   })
   wrap.append(chips, countEl, addBtn, clearBtn, closeBtn)
   document.body.append(wrap)
+  // 初始隐藏；探测到插件可用（pluginReady）后由 syncMode 显示。
+  wrap.style.display = 'none'
 
   // ===== 融入动画：复刻 dock 的 goo metaball（SVG #goo-filter 模糊+阈值，黑色形状互相熔接）=====
   const goo = document.createElement('div')
@@ -6285,6 +6289,9 @@
   }
 
   let items = []
+  // 子岛是 filemgr 插件的可选组件：只有探测到插件可用（stash.list 成功）才显示；
+  // 默认（未安装/未启用/停用后）只有主灵动岛，不出现子岛。
+  let pluginReady = false
   // manual: null=跟随主岛；true=手动展开成长条；false=手动收起成小球。
   let manual = null
   // 上一次渲染是否为长条（用于选择展开动画的弹簧参数）。
@@ -6317,6 +6324,7 @@
   }
   // 收起期间：跟随主岛滑走（滑出屏幕才隐藏）；全屏(over-full，主岛不滑走)时小球收好即隐藏；平时常驻。
   const visible = () => {
+    if (!pluginReady) return false
     if (overFull()) return !ballRest()
     if (dockStowed()) return !mainOffscreen()
     return true
@@ -6418,14 +6426,14 @@
       wrap.classList.add('collapsed'); wrap.classList.remove('open')
     }
     barShown = bar
-    // 位置弹簧：长条=下方居中；小球=左侧垂直居中。用目标尺寸算目标位置，滑动过渡。
+    // 位置弹簧：长条=下方居中；小球=贴主岛左侧顶部（左上角，不随中线）。用目标尺寸算目标位置，滑动过渡。
     {
       const rr = islandEl.getBoundingClientRect()
       const tw = Math.max(1, W.target)
       const th = Math.max(1, H.target)
       let tx, ty
       if (bar) { tx = rr.left + rr.width / 2 - tw / 2; ty = rr.bottom + GAP }
-      else { tx = rr.left - GAP_R - tw; ty = rr.top + (rr.height - th) / 2 }
+      else { tx = rr.left - GAP_R - tw; ty = rr.top }
       // 主岛滑走/恢复过程中：位置直接跟当前矩形同帧走（像主岛一样滑），平时用弹簧平滑。
       const followSnap = dockStowed() || rr.top < -1
       if (!posInit) { X.snap(tx); Y.snap(ty); posInit = true }
@@ -6442,12 +6450,31 @@
     kick()
   }
 
-  async function refresh() {
+  // 声明式探测：问宿主「哪些已启用插件在 manifest 里声明了岛子面板(islandSub)」，
+  // 取声明 'stash' 的那个作数据源。未声明/未启用就是空 —— 默认只有主灵动岛。
+  async function detectProvider() {
     try {
-      const res = await call('stash.list', {})
-      items = (res && res.items) || []
-    } catch (err) {
-      // 插件未运行/未安装：保持原状，不弹错。
+      const list = await invoke('extension_island_subs')
+      const hit = Array.isArray(list) ? list.find(x => x && x.sub === 'stash' && typeof x.id === 'string') : null
+      if (hit) { PROVIDER_ID = hit.id; return true }
+    } catch (err) { /* 旧版宿主无此命令或出错：视为无子面板 */ }
+    return false
+  }
+
+  async function refresh() {
+    // 只有检测到「声明了 stash 子面板且已启用」的插件才出现子岛。
+    pluginReady = await detectProvider()
+    if (pluginReady) {
+      try {
+        const res = await call('stash.list', {})
+        items = (res && res.items) || []
+      } catch (err) {
+        // 声明了但当下不可用（进程未就绪/停用）：先隐藏，等下次探测。
+        pluginReady = false
+        items = []
+      }
+    } else {
+      items = []
     }
     paint()
     // 主动把胶囊 closed 尺寸报给宿主：islandHideUnder=false 时页面不再触发 stow 变化，
@@ -6493,7 +6520,7 @@
     wrap.style.borderRadius = rad.toFixed(2) + 'px'
     if (!posInit) {
       const rr = islandEl.getBoundingClientRect()
-      X.snap(rr.left - GAP_R - BALL); Y.snap(rr.top + (rr.height - BALL) / 2); posInit = true
+      X.snap(rr.left - GAP_R - BALL); Y.snap(rr.top); posInit = true
     }
     wrap.style.left = X.value.toFixed(2) + 'px'
     wrap.style.top = Y.value.toFixed(2) + 'px'
@@ -6632,8 +6659,10 @@
   }
 
   refresh()
-  // 首次进入时插件可能还没起来：失败会静默（items 不更新），这里多试几次并周期刷新。
+  // 首次进入时插件可能还没起来：失败则不显示子岛，这里多试几次并周期刷新（探测到插件后再出现）。
   setTimeout(refresh, 1500)
   setTimeout(refresh, 4000)
   setInterval(() => { if (manual !== true) refresh() }, 5000)
+  // 插件启用/停用、设置变化时立即重新探测（子岛随之出现或消失）。
+  try { if (window.pet && window.pet.onSettingsChanged) window.pet.onSettingsChanged(() => refresh()) } catch (e) { }
 })()

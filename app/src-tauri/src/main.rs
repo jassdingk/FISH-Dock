@@ -1883,6 +1883,7 @@ fn main() {
             plugin_api::extension_cancel,
             plugin_api::extension_auth,
             plugin_api::extension_call,
+            plugin_api::extension_island_subs,
             plugin_api::extension_page,
             plugin_api::extension_page_close,
             plugin_api::extension_page_call,
